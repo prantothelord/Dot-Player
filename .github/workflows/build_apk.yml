@@ -1,0 +1,103 @@
+name: Build PS Player APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.3'
+          channel: 'stable'
+
+      - name: Configure Android Project & Permissions
+        run: |
+          flutter create --platforms=android --org=com.psplayer --project-name=ps_player .
+          python3 -c '
+          import os, re, zlib, struct
+
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              manifest = f.read()
+
+          manifest = manifest.replace("android:label=\"ps_player\"", "android:label=\"PS Player\"")
+
+          permissions = """    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+          """
+          if "READ_MEDIA_AUDIO" not in manifest:
+              manifest = manifest.replace("<application", permissions + "    <application", 1)
+
+          with open(manifest_path, "w", encoding="utf-8") as f:
+              f.write(manifest)
+
+          # Ensure minSdkVersion >= 23 for just_audio & permission_handler
+          for gradle_path in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+              if os.path.exists(gradle_path):
+                  with open(gradle_path, "r", encoding="utf-8") as f:
+                      g = f.read()
+                  g = re.sub(r"minSdkVersion\s+\d+", "minSdkVersion 23", g)
+                  g = re.sub(r"minSdk\s*=\s*\d+", "minSdk = 23", g)
+                  with open(gradle_path, "w", encoding="utf-8") as f:
+                      f.write(g)
+
+          def make_icon(size):
+              raw = bytearray()
+              cx, cy = size / 2.0, size / 2.0
+              r_outer = size * 0.34
+              r_inner = size * 0.24
+              ring_w = max(2.0, size * 0.045)
+              for y in range(size):
+                  raw.append(0)
+                  for x in range(size):
+                      dx, dy = x - cx, y - cy
+                      d = (dx * dx + dy * dy) ** 0.5
+                      in_tri = (dx >= -size * 0.08) and (dx <= size * 0.12) and (abs(dy) <= (size * 0.12 - dx) * 0.65)
+                      if in_tri:
+                          raw.extend([255, 255, 255, 255])
+                      elif abs(d - r_outer) <= ring_w / 2.0:
+                          raw.extend([255, 42, 42, 255])
+                      elif d <= r_inner:
+                          raw.extend([28, 28, 30, 255])
+                      else:
+                          raw.extend([8, 8, 10, 255])
+              def chunk(tag, data):
+                  return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
+              ihdr = struct.pack("!IIBBBBB", size, size, 8, 6, 0, 0, 0)
+              return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b"")
+
+          for folder, sz in {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }.items():
+              out_dir = f"android/app/src/main/res/{folder}"
+              os.makedirs(out_dir, exist_ok=True)
+              with open(f"{out_dir}/ic_launcher.png", "wb") as f:
+                  f.write(make_icon(sz))
+          '
+
+      - run: flutter pub get
+      - run: flutter build apk --release
+
+      - name: Rename PS Player APK
+        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/PS-Player.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS-Player-APK
+          path: build/app/outputs/flutter-apk/PS-Player.apk
